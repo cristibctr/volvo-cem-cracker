@@ -2,6 +2,8 @@
 
 A research project grown out of curiosity. Cracks 6 bytes of pin code via High Speed CAN-bus in under 20 minutes.
 
+See **BUILDING.md** for instructions on compiling and uploading the sketch on Teensy or STM32 boards.
+
 ## Supported platforms:
 
 * P1:

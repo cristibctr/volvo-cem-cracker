@@ -28,7 +28,7 @@
 #include <stdarg.h>
 
 #if defined(PLATFORM_STM32)
-#include <CAN.h>           /* STM32 CAN library */
+#include <STM32_CAN.h>     /* STM32 CAN library */
 #else
 #include <FlexCAN_T4.h>
 #endif
@@ -55,8 +55,12 @@ uint32_t cem_reply_max;
 #endif
 
 #if defined(PLATFORM_STM32)
-CANClass can_hs;
-CANClass can_ls;
+STM32_CAN can_hs(CAN1, DEF, RX_SIZE_256, TX_SIZE_16);
+#ifdef CAN2
+STM32_CAN can_ls(CAN2, DEF, RX_SIZE_256, TX_SIZE_16);
+#else
+#define can_ls can_hs
+#endif
 #else
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can_hs;
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> can_ls;
@@ -95,14 +99,6 @@ static inline void serial_printf(const char *fmt, ...)
 #endif
 
 #define CAN_MSG_SIZE    8       /* messages are always 8 bytes */
-
-#if defined(PLATFORM_STM32)
-typedef struct {
-  uint32_t id;
-  uint8_t  buf[CAN_MSG_SIZE];
-  uint8_t  len;
-} CAN_message_t;
-#endif
 
 #define CEM_HS_ECU_ID   0x50    /* CEM ECU id on the high-speed CAN bus */
 #define CEM_LS_ECU_ID   0x40    /* CEM ECU id on the low-speed CAN bus */
@@ -268,15 +264,21 @@ void abortIsr (void)
 #if defined(PLATFORM_STM32)
 void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
 {
-  CANClass &can = (bus == CAN_HS) ? can_hs : can_ls;
-  if (verbose) {
-    printf ("CAN_%cS ---> ID=%08x data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
-            bus == CAN_HS ? 'H' : 'L',
-            id, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+  STM32_CAN &can = (bus == CAN_HS) ? can_hs : can_ls;
+  CAN_message_t msg;
+
+  if (verbose == true) {
+      printf ("CAN_%cS ---> ID=%08x data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+              bus == CAN_HS ? 'H' : 'L',
+              id, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
   }
-  can.beginExtendedPacket(id, CAN_MSG_SIZE);
-  can.write(data, CAN_MSG_SIZE);
-  can.endPacket();
+
+  msg.id = id;
+  msg.len = 8;
+  msg.flags.extended = 1;
+  memcpy (msg.buf, data, 8);
+
+  can.write(msg);
 }
 #else
 void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
@@ -328,28 +330,34 @@ volatile bool can_ls_event_msg_available = false;
 bool canMsgReceive (can_bus_id_t bus, uint32_t *id, uint8_t *data, uint32_t wait, bool verbose)
 {
 #if defined(PLATFORM_STM32)
-  CANClass &can = (bus == CAN_HS) ? can_hs : can_ls;
+  STM32_CAN &can = (bus == CAN_HS) ? can_hs : can_ls;
+  CAN_message_t msg;
   uint32_t start = millis();
+  bool ret = false;
+
   while ((millis() - start) < wait) {
-    int packetSize = can.parsePacket();
-    if (packetSize) {
-      uint32_t rxId = can.packetId();
-      if (id)
-        *id = rxId;
-      if (data) {
-        for (int i = 0; i < CAN_MSG_SIZE && i < packetSize; i++)
-          data[i] = can.read();
-      } else {
-        while (can.available())
-          can.read();
-      }
-      if (verbose) {
-        printf("CAN_%cS <--- ID=%08x\n", bus == CAN_HS ? 'H' : 'L', rxId);
-      }
-      return true;
+    if (can.read(msg)) {
+      ret = true;
+      break;
     }
   }
-  return false;
+
+  if (!ret)
+    return false;
+
+  if (id)
+    *id = msg.id;
+  if (data)
+    memcpy(data, msg.buf, CAN_MSG_SIZE);
+
+  if (verbose) {
+    printf("CAN_%cS <--- ID=%08x data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           bus == CAN_HS ? 'H' : 'L', msg.id,
+           msg.buf[0], msg.buf[1], msg.buf[2], msg.buf[3],
+           msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]);
+  }
+
+  return true;
 #else
   uint8_t *pData;
   uint32_t canId = 0;
@@ -1166,16 +1174,7 @@ bool cemCrackPin (uint32_t maxBytes, bool verbose)
  * Returns: N/A
  */
 
-#if defined(PLATFORM_STM32)
-void can_hs_event(int packetSize)
-{
-  can_hs_event_msg.id = can_hs.packetId();
-  can_hs_event_msg.len = packetSize;
-  for (int i = 0; i < packetSize && i < CAN_MSG_SIZE; i++)
-    can_hs_event_msg.buf[i] = can_hs.read();
-  can_hs_event_msg_available = true;
-}
-#else
+#ifdef PLATFORM_TEENSY
 void can_hs_event (const CAN_message_t &msg)
 {
   can_hs_event_msg = msg;
@@ -1190,16 +1189,7 @@ void can_hs_event (const CAN_message_t &msg)
  * Returns: N/A
  */
 
-#if defined(PLATFORM_STM32)
-void can_ls_event(int packetSize)
-{
-  can_ls_event_msg.id = can_ls.packetId();
-  can_ls_event_msg.len = packetSize;
-  for (int i = 0; i < packetSize && i < CAN_MSG_SIZE; i++)
-    can_ls_event_msg.buf[i] = can_ls.read();
-  can_ls_event_msg_available = true;
-}
-#else
+#ifdef PLATFORM_TEENSY
 void can_ls_event (const CAN_message_t &msg)
 {
   can_ls_event_msg = msg;
@@ -1217,8 +1207,8 @@ void can_ls_event (const CAN_message_t &msg)
 void can_ls_init (uint32_t baud)
 {
 #if defined(PLATFORM_STM32)
-  can_ls.begin(baud);
-  can_ls.onReceive(can_ls_event);
+  can_ls.begin();
+  can_ls.setBaudRate(baud);
 #else
   can_ls.begin ();
   can_ls.setBaudRate (baud);
@@ -1240,8 +1230,8 @@ void can_ls_init (uint32_t baud)
 void can_hs_init (uint32_t baud)
 {
 #if defined(PLATFORM_STM32)
-  can_hs.begin(baud);
-  can_hs.onReceive(can_hs_event);
+  can_hs.begin();
+  can_hs.setBaudRate(baud);
 #else
   can_hs.begin ();
   can_hs.setBaudRate (baud);
