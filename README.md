@@ -2,6 +2,11 @@
 
 A research project grown out of curiosity. Cracks 6 bytes of pin code via High Speed CAN-bus in under 20 minutes.
 
+The repository includes a **BUILDING.md** file with step-by-step instructions
+for compiling the sketch on either a Teensy 4.x or an STM32F411 "black pill".
+When targeting STM32 remember to copy `hal_conf_extra.h` next to the `.ino` and
+install the `STM32_CAN` library from the Arduino Library Manager.
+
 See **BUILDING.md** for instructions on compiling and uploading the sketch on Teensy or STM32 boards.
 
 ## Supported platforms:

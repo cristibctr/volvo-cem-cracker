@@ -11,14 +11,17 @@ This project can be built with the Arduino IDE using either a Teensy 4.x or an S
 - **Libraries**
   - `LiquidCrystal`
   - `FlexCAN_T4` (Teensy only)
-  - `STM32_CAN` (install via Library Manager for STM32)
+  - `STM32_CAN` (install via Library Manager for STM32). This library replaces
+    the old "STM32duino CAN" package and is maintained by Pasi Kemppainen.
 
 ## Steps
 
 1. Open the Arduino IDE and install the required board support using **Tools → Board → Boards Manager…**
 2. For the black pill, select **Generic STM32F4 series → BlackPill F411CE** from the board list.
 3. Use **Tools → Manage Libraries…** to install the **CAN bus Library for Arduino STM32** (`STM32_CAN`) if it is not already present.
-4. Create a file named `hal_conf_extra.h` next to the sketch with the following line to enable CAN support:
+4. Create a file named `hal_conf_extra.h` next to the sketch with the following
+   line to enable CAN support (this repository already ships with such a file,
+   just make sure it lives in the same folder as the `.ino`):
    ```
    #define HAL_CAN_MODULE_ENABLED
    ```
