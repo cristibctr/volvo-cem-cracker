@@ -274,7 +274,7 @@ void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
             bus == CAN_HS ? 'H' : 'L',
             id, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
   }
-  can.beginExtendedPacket(id);
+  can.beginExtendedPacket(id, CAN_MSG_SIZE);
   can.write(data, CAN_MSG_SIZE);
   can.endPacket();
 }
@@ -1167,9 +1167,12 @@ bool cemCrackPin (uint32_t maxBytes, bool verbose)
  */
 
 #if defined(PLATFORM_STM32)
-void can_hs_event(CAN_message_t &msg)
+void can_hs_event(int packetSize)
 {
-  can_hs_event_msg = msg;
+  can_hs_event_msg.id = can_hs.packetId();
+  can_hs_event_msg.len = packetSize;
+  for (int i = 0; i < packetSize && i < CAN_MSG_SIZE; i++)
+    can_hs_event_msg.buf[i] = can_hs.read();
   can_hs_event_msg_available = true;
 }
 #else
@@ -1188,9 +1191,12 @@ void can_hs_event (const CAN_message_t &msg)
  */
 
 #if defined(PLATFORM_STM32)
-void can_ls_event(CAN_message_t &msg)
+void can_ls_event(int packetSize)
 {
-  can_ls_event_msg = msg;
+  can_ls_event_msg.id = can_ls.packetId();
+  can_ls_event_msg.len = packetSize;
+  for (int i = 0; i < packetSize && i < CAN_MSG_SIZE; i++)
+    can_ls_event_msg.buf[i] = can_ls.read();
   can_ls_event_msg_available = true;
 }
 #else
@@ -1212,7 +1218,7 @@ void can_ls_init (uint32_t baud)
 {
 #if defined(PLATFORM_STM32)
   can_ls.begin(baud);
-  can_ls.attachInterrupt(can_ls_event);
+  can_ls.onReceive(can_ls_event);
 #else
   can_ls.begin ();
   can_ls.setBaudRate (baud);
@@ -1235,7 +1241,7 @@ void can_hs_init (uint32_t baud)
 {
 #if defined(PLATFORM_STM32)
   can_hs.begin(baud);
-  can_hs.attachInterrupt(can_hs_event);
+  can_hs.onReceive(can_hs_event);
 #else
   can_hs.begin ();
   can_hs.setBaudRate (baud);
