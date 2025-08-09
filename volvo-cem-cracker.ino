@@ -16,12 +16,21 @@
 
 /* end of tunable parameters */
 
-#include <stdio.h>
-#include <FlexCAN_T4.h>
-#include <LiquidCrystal.h>
+#if defined(__IMXRT1062__)
+#define PLATFORM_TEENSY
+#endif
+#if defined(ARDUINO_ARCH_STM32)
+#define PLATFORM_STM32
+#endif
 
-#if !defined(__IMXRT1062__)
-#error Unsupported Teensy model, need 4.x
+#include <LiquidCrystal.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+#if defined(PLATFORM_STM32)
+#include <STM32_CAN.h>     /* STM32 CAN library */
+#else
+#include <FlexCAN_T4.h>
 #endif
 
 uint32_t cem_reply_min;
@@ -31,16 +40,31 @@ uint32_t cem_reply_max;
 #define AVERAGE_DELTA_MIN     -8  /* buckets to look at before the rolling average */
 #define AVERAGE_DELTA_MAX     12  /* buckets to look at after the rolling average  */
 
-#define CAN_L_PIN      PIND2     /* CAN Rx pin connected to digital pin 2 */
-#define CALC_BYTES_PIN PIND3     /* calculated bytes selection to digital pin 3 */
+#define CAN_L_PIN      2         /* CAN Rx pin connected to digital pin 2 */
+#define CALC_BYTES_PIN 3         /* calculated bytes selection to digital pin 3 */
 #define ABORT_PIN      14        /* abort cracking request */
 
 #define CAN_500KBPS 500000      /* 500 Kbit speed */
 #define CAN_250KBPS 250000      /* 250 Kbit speed */
 #define CAN_125KBPS 125000      /* 125 Kbit speed */
 
+#if defined(PLATFORM_STM32)
+#define KLINE_SERIAL Serial2
+#else
+#define KLINE_SERIAL Serial3
+#endif
+
+#if defined(PLATFORM_STM32)
+STM32_CAN can_hs(CAN1, DEF, RX_SIZE_256, TX_SIZE_16);
+#ifdef CAN2
+STM32_CAN can_ls(CAN2, DEF, RX_SIZE_256, TX_SIZE_16);
+#else
+#define can_ls can_hs
+#endif
+#else
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can_hs;
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> can_ls;
+#endif
 
 typedef enum {
   CAN_HS,       /* high-speed bus */
@@ -49,9 +73,30 @@ typedef enum {
 
 /* use the ARM cycle counter as the time-stamp */
 
+#if defined(PLATFORM_STM32)
+#define TSC DWT->CYCCNT
+#else
 #define TSC ARM_DWT_CYCCNT
+#endif
 
+#if defined(PLATFORM_TEENSY)
 #define printf Serial.printf
+#else
+static inline void serial_printf(const char *fmt, ...)
+{
+  char buf[128];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Serial.print(buf);
+}
+#define printf serial_printf
+#endif
+
+#ifndef F_CPU_ACTUAL
+#define F_CPU_ACTUAL F_CPU
+#endif
 
 #define CAN_MSG_SIZE    8       /* messages are always 8 bytes */
 
@@ -151,7 +196,11 @@ uint32_t calc_bytes = CALC_BYTES;
 
 /* Teensy function to set the core's clock rate */
 
+#ifdef PLATFORM_TEENSY
 extern "C" uint32_t set_arm_clock (uint32_t freq);
+#else
+static inline uint32_t set_arm_clock (uint32_t freq) { return freq; }
+#endif
 
 /* Initialize the LCD library for use with the Hitachi HD44780
  * controller using the following interface pins:
@@ -212,6 +261,26 @@ void abortIsr (void)
  * Returns: N/A
  */
 
+#if defined(PLATFORM_STM32)
+void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
+{
+  STM32_CAN &can = (bus == CAN_HS) ? can_hs : can_ls;
+  CAN_message_t msg;
+
+  if (verbose == true) {
+      printf ("CAN_%cS ---> ID=%08x data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+              bus == CAN_HS ? 'H' : 'L',
+              id, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+  }
+
+  msg.id = id;
+  msg.len = 8;
+  msg.flags.extended = 1;
+  memcpy (msg.buf, data, 8);
+
+  can.write(msg);
+}
+#else
 void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
 {
   CAN_message_t msg;
@@ -242,6 +311,7 @@ void canMsgSend (can_bus_id_t bus, uint32_t id, uint8_t *data, bool verbose)
       break;
   }
 }
+#endif
 
 CAN_message_t can_hs_event_msg;
 CAN_message_t can_ls_event_msg;
@@ -259,6 +329,36 @@ volatile bool can_ls_event_msg_available = false;
 
 bool canMsgReceive (can_bus_id_t bus, uint32_t *id, uint8_t *data, uint32_t wait, bool verbose)
 {
+#if defined(PLATFORM_STM32)
+  STM32_CAN &can = (bus == CAN_HS) ? can_hs : can_ls;
+  CAN_message_t msg;
+  uint32_t start = millis();
+  bool ret = false;
+
+  while ((millis() - start) < wait) {
+    if (can.read(msg)) {
+      ret = true;
+      break;
+    }
+  }
+
+  if (!ret)
+    return false;
+
+  if (id)
+    *id = msg.id;
+  if (data)
+    memcpy(data, msg.buf, CAN_MSG_SIZE);
+
+  if (verbose) {
+    printf("CAN_%cS <--- ID=%08x data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           bus == CAN_HS ? 'H' : 'L', msg.id,
+           msg.buf[0], msg.buf[1], msg.buf[2], msg.buf[3],
+           msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]);
+  }
+
+  return true;
+#else
   uint8_t *pData;
   uint32_t canId = 0;
   bool     ret = false;
@@ -310,6 +410,7 @@ bool canMsgReceive (can_bus_id_t bus, uint32_t *id, uint8_t *data, uint32_t wait
 
   return ret;
 }
+#endif
 
 /*******************************************************************************
  *
@@ -1073,11 +1174,13 @@ bool cemCrackPin (uint32_t maxBytes, bool verbose)
  * Returns: N/A
  */
 
+#ifdef PLATFORM_TEENSY
 void can_hs_event (const CAN_message_t &msg)
 {
   can_hs_event_msg = msg;
   can_hs_event_msg_available = true;
 }
+#endif
 
 /*******************************************************************************
  *
@@ -1086,11 +1189,13 @@ void can_hs_event (const CAN_message_t &msg)
  * Returns: N/A
  */
 
+#ifdef PLATFORM_TEENSY
 void can_ls_event (const CAN_message_t &msg)
 {
   can_ls_event_msg = msg;
   can_ls_event_msg_available = true;
 }
+#endif
 
 /*******************************************************************************
  *
@@ -1101,12 +1206,17 @@ void can_ls_event (const CAN_message_t &msg)
 
 void can_ls_init (uint32_t baud)
 {
+#if defined(PLATFORM_STM32)
+  can_ls.begin();
+  can_ls.setBaudRate(baud);
+#else
   can_ls.begin ();
   can_ls.setBaudRate (baud);
   can_ls.enableFIFO ();
   can_ls.enableFIFOInterrupt ();
   can_ls.setFIFOFilter (ACCEPT_ALL);
   can_ls.onReceive (can_ls_event);
+#endif
   printf ("CAN low-speed init done.\n");
 }
 
@@ -1119,12 +1229,17 @@ void can_ls_init (uint32_t baud)
 
 void can_hs_init (uint32_t baud)
 {
+#if defined(PLATFORM_STM32)
+  can_hs.begin();
+  can_hs.setBaudRate(baud);
+#else
   can_hs.begin ();
   can_hs.setBaudRate (baud);
   can_hs.enableFIFO ();
   can_hs.enableFIFOInterrupt ();
   can_hs.setFIFOFilter (ACCEPT_ALL);
   can_hs.onReceive (can_hs_event);
+#endif
   printf ("CAN high-speed init done.\n");
 }
 
@@ -1151,7 +1266,7 @@ void k_line_keep_alive ()
 {
   uint8_t msg[] = { 0x84, 0x40, 0x13, 0xb2, 0xf0, 0x03, 0x7c };
 
-  Serial3.write (msg, sizeof(msg));
+  KLINE_SERIAL.write (msg, sizeof(msg));
 }
 
 /*******************************************************************************
@@ -1288,14 +1403,18 @@ void setup (void)
   /* set up the serial port */
 
   Serial.begin (115200);
-  Serial3.begin (10800); /* K-Line */
+  KLINE_SERIAL.begin (10800); /* K-Line */
 
   delay (3000);
 
   /* enable the time stamp counter */
-
+#if defined(PLATFORM_STM32)
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+#else
   ARM_DEMCR |= ARM_DEMCR_TRCENA;
   ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
+#endif
 
   /* set up the pin for sampling the CAN bus */
 
@@ -1319,7 +1438,9 @@ void setup (void)
   if (digitalRead (CALC_BYTES_PIN) == 0)
       calc_bytes = 2;
 
+#ifdef PLATFORM_TEENSY
   set_arm_clock (180000000);
+#endif
 
   printf ("Build Date:              %s %s\n", __DATE__, __TIME__);
   printf ("CPU Maximum Frequency:   %u\n", F_CPU);
